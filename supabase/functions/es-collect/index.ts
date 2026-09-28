@@ -29,17 +29,17 @@ const ASSETS: Record<string, string[]> = {
 
 export function parseQuestion(q: string): Parsed {
   const t = (q || "").toLowerCase();
-  if (!t) return { asset: null, kind: null, strike: null, reason: "题目为空" };
+  if (!t) return { asset: null, kind: null, strike: null, reason: "Untitled market" };
   if (t.includes("marketcap") || t.includes("market cap")) {
-    return { asset: null, kind: null, strike: null, reason: "市值类题目，暂无模型" };
+    return { asset: null, kind: null, strike: null, reason: "Market-cap question: no model yet" };
   }
   let asset: string | null = null;
   for (const [sym, words] of Object.entries(ASSETS)) {
     if (words.some((w) => new RegExp(`(^|[^a-z$])\\$?${w}([^a-z]|$)`).test(t))) { asset = sym; break; }
   }
-  if (!asset) return { asset: null, kind: null, strike: null, reason: "不是比特币、以太坊或 Solana 价格题" };
+  if (!asset) return { asset: null, kind: null, strike: null, reason: "Not a BTC/ETH/SOL price question: no model" };
   const m = t.match(/\$\s?([0-9][0-9,]*(?:\.[0-9]+)?)\s*(k|m)?/) ?? t.match(/([0-9][0-9,]*(?:\.[0-9]+)?)\s*(k|m)?\s*(?:usd|dollars)/);
-  if (!m) return { asset, kind: null, strike: null, reason: "找不到价位" };
+  if (!m) return { asset, kind: null, strike: null, reason: "No price level found in the question" };
   let strike = parseFloat(m[1].replace(/,/g, ""));
   if (m[2] === "k") strike *= 1e3;
   if (m[2] === "m") strike *= 1e6;
@@ -49,7 +49,7 @@ export function parseQuestion(q: string): Parsed {
   else if (/\b(hit|reach|touch|cross)\b/.test(t)) { kind = "touch"; dir = "either"; }
   else if (/(at or above|above|over|higher than|greater than|>=)/.test(t)) kind = "close_above";
   else if (/(at or below|below|under|lower than|less than|<=)/.test(t)) kind = "close_below";
-  if (!kind) return { asset, kind: null, strike, reason: "看不懂题目的结算方式" };
+  if (!kind) return { asset, kind: null, strike, reason: "Resolution rule not recognised: no model" };
   return { asset, kind, strike, dir };
 }
 
@@ -124,7 +124,7 @@ Deno.serve(async () => {
   const started = Date.now();
   const log: Record<string, unknown> = {};
   try {
-    if (!PANTA_KEY) throw new Error("PANTA_API_KEY 未设置");
+    if (!PANTA_KEY) throw new Error("PANTA_API_KEY not set");
     // throttle: skip if a run finished in the last 60 seconds
     const { data: last } = await sb.from("es_runs").select("ts").eq("kind", "collect").eq("ok", true)
       .order("ts", { ascending: false }).limit(1);
@@ -171,13 +171,13 @@ Deno.serve(async () => {
 
       // 3. valuation (crypto price questions only)
       if (!parsed.kind || !parsed.asset || !parsed.strike) {
-        await sb.from("es_valuations").insert({ market_id: d.marketId, market_prob_yes: yes, note: parsed.reason ?? "无模型" });
+        await sb.from("es_valuations").insert({ market_id: d.marketId, market_prob_yes: yes, note: parsed.reason ?? "No model" });
         continue;
       }
       if (!(parsed.asset in priceCache)) priceCache[parsed.asset] = await spotAndVol(parsed.asset);
       const px = priceCache[parsed.asset];
       if (!px) {
-        await sb.from("es_valuations").insert({ market_id: d.marketId, market_prob_yes: yes, note: "取不到现价" });
+        await sb.from("es_valuations").insert({ market_id: d.marketId, market_prob_yes: yes, note: "Spot price unavailable" });
         continue;
       }
       const T = Math.max((d.endTime - now) / (365 * 24 * 3600), 1 / (365 * 24 * 60));
@@ -212,10 +212,10 @@ Deno.serve(async () => {
           }
           row.depth_usdc = depth;
         } else {
-          row.note = "报价接口没有返回";
+          row.note = "Panta quote unavailable";
         }
       } else {
-        row.note = "二级市场阶段，没有一级报价";
+        row.note = "Secondary phase: no opening-curve quote; compare model with last trade price";
         if (yes != null) row.net_edge = null;
       }
       await sb.from("es_valuations").insert(row);
