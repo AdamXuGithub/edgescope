@@ -259,10 +259,13 @@ Deno.serve(async () => {
     for (const a of Object.keys(MINTS)) priceCache[a] = await spotAndVol(a);
     log.solami = Object.keys(MINTS).filter((a) => priceCache[a]?.source === "solami-blur").length;
     if (solamiNote) log.solami_note = solamiNote;
+    // Panta sometimes returns an empty title for a market it named before: keep the last known question.
+    const { data: known } = await sb.from("es_markets").select("market_id,question").in("market_id", live.map((m) => m.marketId));
+    const knownQ = new Map((known ?? []).map((k: any) => [k.market_id, k.question as string]));
     let valued = 0, quotes = 0;
     for (const m of live) {
       const d = await pantaGet(`/markets/${m.marketId}/`);
-      const question = d.question || d.title || "";
+      const question = d.question || d.title || m.question || m.title || knownQ.get(d.marketId) || "";
       const parsed = parseQuestion(question);
       await sb.from("es_markets").upsert({
         market_id: d.marketId, category: d.category, question, phase: d.phase, status: d.status,
