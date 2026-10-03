@@ -1,7 +1,7 @@
 import { getLatest, getPrices, type PriceRow, type Row } from "@/lib/data";
 import styles from "./page.module.css";
 
-export const revalidate = 60;
+export const dynamic = "force-dynamic"; // always render with fresh data (ISR was serving stale pages)
 
 const pct = (x: number | null | undefined, d = 1) => (x == null ? "—" : `${(x * 100).toFixed(d)}%`);
 const usd = (x: number | null | undefined) =>

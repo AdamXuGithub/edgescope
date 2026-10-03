@@ -36,7 +36,7 @@ export type Row = {
 async function rest<T>(path: string): Promise<T> {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${SUPABASE_ANON}` },
-    next: { revalidate: 60 },
+    cache: "no-store",
   });
   if (!r.ok) throw new Error(`Supabase ${r.status}`);
   return r.json();
