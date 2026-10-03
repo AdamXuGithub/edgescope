@@ -52,3 +52,22 @@ export async function getHistory(marketId: string) {
     `es_valuations?select=ts,model_prob_yes,market_prob_yes&market_id=eq.${encodeURIComponent(marketId)}&order=ts.asc&limit=2000`,
   );
 }
+
+export type PriceRow = {
+  ts: string;
+  asset: string;
+  source: string;
+  ok: boolean;
+  spot: number | null;
+  vol_annual: number | null;
+  bars: number | null;
+  note: string | null;
+};
+
+// Last ~24h of price observations for SOL / BTC / ETH from both sources.
+export async function getPrices(): Promise<PriceRow[]> {
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  return rest<PriceRow[]>(
+    `es_prices?select=ts,asset,source,ok,spot,vol_annual,bars,note&ts=gt.${since}&order=ts.asc&limit=5000`,
+  );
+}

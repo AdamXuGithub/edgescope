@@ -83,20 +83,126 @@ export function modelProb(kind: string, S: number, K: number, sigma: number, T: 
   }
 }
 
-// Price source. Until Solami is connected this uses Coinbase public hourly candles.
-async function spotAndVol(asset: string): Promise<{ spot: number; vol: number; source: string } | null> {
+// ---------- Price sources ----------
+// Primary: Solami Blur REST (decoded on-chain DEX trades, per-minute rollup).
+// Reference / fallback: Coinbase public hourly candles.
+const SOLAMI = "https://api.solami.dev";
+const SOLAMI_KEY = Deno.env.get("SOLAMI_API_KEY") ?? "";
+// Solana mints used for on-chain prices: wrapped SOL, Coinbase cbBTC, Wormhole WETH.
+const MINTS: Record<string, string> = {
+  SOL: "So11111111111111111111111111111111111111112",
+  BTC: "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+  ETH: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+};
+const MAX_SOURCE_GAP = 0.03; // if on-chain and reference prices differ by more than 3%, fall back and flag it
+
+type Px = { spot: number; vol: number; bars: number; source: string; mint?: string; note?: string };
+
+function annualVol(closes: number[], barsPerYear: number): number | null {
+  if (closes.length < 25) return null;
+  const rets: number[] = [];
+  for (let i = 1; i < closes.length; i++) if (closes[i] > 0 && closes[i - 1] > 0) rets.push(Math.log(closes[i] / closes[i - 1]));
+  if (rets.length < 24) return null;
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const v = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length - 1);
+  return Math.sqrt(v * barsPerYear);
+}
+
+async function coinbase(asset: string): Promise<Px | null> {
   const r = await fetch(`https://api.exchange.coinbase.com/products/${asset}-USD/candles?granularity=3600`, {
     headers: { "User-Agent": "EdgeScope" },
   });
   if (!r.ok) return null;
   const rows: number[][] = await r.json(); // [time, low, high, open, close, volume], newest first
   const closes = rows.map((x) => x[4]).reverse();
-  if (closes.length < 48) return null;
-  const rets: number[] = [];
-  for (let i = 1; i < closes.length; i++) rets.push(Math.log(closes[i] / closes[i - 1]));
-  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
-  const v = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length - 1);
-  return { spot: closes[closes.length - 1], vol: Math.sqrt(v * 24 * 365), source: "coinbase-hourly" };
+  const vol = annualVol(closes, 24 * 365);
+  if (vol == null) return null;
+  return { spot: closes[closes.length - 1], vol, bars: closes.length, source: "coinbase-hourly" };
+}
+
+// Pull candles out of a response without depending on one exact shape.
+function candlesFrom(body: unknown): { t: number; c: number }[] {
+  const pickArr = (b: any): any[] | null => {
+    if (Array.isArray(b)) return b;
+    if (!b || typeof b !== "object") return null;
+    for (const k of ["candles", "ohlcv", "data", "items", "result", "bars"]) {
+      const v = b[k];
+      if (Array.isArray(v)) return v;
+      if (v && typeof v === "object") { const w = pickArr(v); if (w) return w; }
+    }
+    return null;
+  };
+  const arr = pickArr(body) ?? [];
+  const out: { t: number; c: number }[] = [];
+  for (const x of arr) {
+    let t: number, c: number;
+    if (Array.isArray(x)) { t = Number(x[0]); c = Number(x[4]); }
+    else {
+      t = Number(x.t ?? x.time ?? x.ts ?? x.timestamp ?? x.open_time ?? x.openTime ?? x.start);
+      c = Number(x.c ?? x.close ?? x.close_usd ?? x.closeUsd ?? x.price);
+    }
+    if (isFinite(t) && isFinite(c) && c > 0) out.push({ t: t > 1e12 ? t / 1000 : t, c });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+let solamiNote = "";
+async function solami(asset: string): Promise<Px | null> {
+  const mint = MINTS[asset];
+  if (!SOLAMI_KEY || !mint) { solamiNote = "SOLAMI_API_KEY not set"; return null; }
+  const H2 = { "x-api-key": SOLAMI_KEY };
+  // Try hourly bars first; fall back to minute bars resampled to hourly.
+  for (const [interval, count, perHour] of [["1h", 300, 1], ["1m", 5000, 60]] as [string, number, number][]) {
+    const url = `${SOLAMI}/data/token/ohlcv?chain=solana&address=${mint}&interval=${interval}&count=${count}&denom=usd`;
+    const r = await fetch(url, { headers: H2 });
+    const text = await r.text();
+    if (!r.ok) {
+      let msg = text.slice(0, 160);
+      try { msg = JSON.parse(text).message ?? msg; } catch (_) { /* keep raw */ }
+      solamiNote = `Solami ${r.status}: ${msg}`;
+      if (r.status === 401 || r.status === 403) return null; // permission problem: no point retrying
+      continue;
+    }
+    let body: unknown;
+    try { body = JSON.parse(text); } catch (_) { solamiNote = "Solami: non-JSON response"; continue; }
+    let bars = candlesFrom(body);
+    if (perHour > 1 && bars.length) {
+      const byHour = new Map<number, number>();
+      for (const b of bars) byHour.set(Math.floor(b.t / 3600), b.c); // last close in each hour
+      bars = [...byHour.entries()].sort((a, b) => a[0] - b[0]).map(([h, c]) => ({ t: h * 3600, c }));
+    }
+    const closes = bars.map((b) => b.c);
+    const vol = annualVol(closes, 24 * 365);
+    if (vol == null) { solamiNote = `Solami ${interval}: only ${closes.length} bars`; continue; }
+    // Latest trade price, if the price endpoint answers; otherwise the last close.
+    let spot = closes[closes.length - 1];
+    try {
+      const pr = await fetch(`${SOLAMI}/data/token/price?chain=solana&address=${mint}`, { headers: H2 });
+      if (pr.ok) {
+        const pj: any = await pr.json();
+        const v = Number(pj?.price_usd ?? pj?.priceUsd ?? pj?.usd ?? pj?.price ?? pj?.data?.price_usd ?? pj?.data?.price);
+        if (isFinite(v) && v > 0) spot = v;
+      }
+    } catch (_) { /* last close is fine */ }
+    solamiNote = "";
+    return { spot, vol, bars: closes.length, source: "solami-blur", mint };
+  }
+  return null;
+}
+
+// Decide which price the model uses, and log both sources for transparency.
+async function spotAndVol(asset: string): Promise<Px | null> {
+  const [onchain, ref] = await Promise.all([solami(asset).catch(() => null), coinbase(asset).catch(() => null)]);
+  const rows: Record<string, unknown>[] = [];
+  if (onchain) rows.push({ asset, source: onchain.source, mint: onchain.mint, spot: onchain.spot, vol_annual: onchain.vol, bars: onchain.bars, ok: true, note: null });
+  else rows.push({ asset, source: "solami-blur", mint: MINTS[asset], spot: null, vol_annual: null, bars: null, ok: false, note: solamiNote || "unavailable" });
+  if (ref) rows.push({ asset, source: ref.source, mint: null, spot: ref.spot, vol_annual: ref.vol, bars: ref.bars, ok: true, note: null });
+  const { error: pe } = await sb.from("es_prices").insert(rows);
+  if (pe) solamiNote = (solamiNote ? solamiNote + "; " : "") + "es_prices insert: " + pe.message;
+  if (onchain && ref && Math.abs(onchain.spot / ref.spot - 1) > MAX_SOURCE_GAP) {
+    return { ...ref, note: `On-chain price differs from reference by ${((onchain.spot / ref.spot - 1) * 100).toFixed(1)}%: using reference` };
+  }
+  return onchain ?? ref;
 }
 
 async function pantaGet(path: string) {
@@ -149,7 +255,10 @@ Deno.serve(async () => {
     log.live = live.length;
 
     // 2. detail + snapshot for live markets
-    const priceCache: Record<string, Awaited<ReturnType<typeof spotAndVol>>> = {};
+    const priceCache: Record<string, Px | null> = {};
+    for (const a of Object.keys(MINTS)) priceCache[a] = await spotAndVol(a);
+    log.solami = Object.keys(MINTS).filter((a) => priceCache[a]?.source === "solami-blur").length;
+    if (solamiNote) log.solami_note = solamiNote;
     let valued = 0, quotes = 0;
     for (const m of live) {
       const d = await pantaGet(`/markets/${m.marketId}/`);
@@ -186,6 +295,7 @@ Deno.serve(async () => {
         market_id: d.marketId, asset: parsed.asset, spot: px.spot, strike: parsed.strike, vol_annual: px.vol,
         years_to_expiry: T, model_prob_yes: p, market_prob_yes: yes, fee_rate: FEE_RATE, price_source: px.source,
       };
+      if (px.note) row.note = px.note;
 
       if (d.phase === "primary") {
         // Compare the side the model disagrees with the market on, using real quotes (fees included).

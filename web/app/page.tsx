@@ -1,4 +1,4 @@
-import { getLatest, type Row } from "@/lib/data";
+import { getLatest, getPrices, type PriceRow, type Row } from "@/lib/data";
 import styles from "./page.module.css";
 
 export const revalidate = 60;
@@ -30,9 +30,10 @@ function gap(r: Row) {
 
 export default async function Home() {
   let rows: Row[] = [];
+  let prices: PriceRow[] = [];
   let error = "";
   try {
-    rows = await getLatest();
+    [rows, prices] = await Promise.all([getLatest(), getPrices().catch(() => [] as PriceRow[])]);
   } catch (e) {
     error = String(e);
   }
@@ -78,6 +79,18 @@ export default async function Home() {
       </section>
 
       {error && <p className={styles.error}>Data temporarily unavailable.</p>}
+
+      <h2 className={styles.h2}>Price feeds</h2>
+      <p className={styles.muted}>
+        Spot and volatility come from on-chain Solana DEX trades decoded by Solami Blur (wrapped SOL, cbBTC, Wormhole
+        WETH). Coinbase is shown as an off-chain cross-check; if the two disagree by more than 3% the model falls back
+        to the reference and says so.
+      </p>
+      <div className={styles.feeds}>
+        {["SOL", "BTC", "ETH"].map((a) => (
+          <Feed key={a} asset={a} rows={prices.filter((p) => p.asset === a)} />
+        ))}
+      </div>
 
       <h2 className={styles.h2}>Crypto price markets</h2>
       {modeled.length === 0 && <p className={styles.muted}>No live crypto price markets right now.</p>}
@@ -154,7 +167,7 @@ export default async function Home() {
           <li>Crypto threshold questions are parsed into asset, level and expiry. Anything else is listed without a number.</li>
           <li>
             The model is a driftless lognormal: probability of closing above a level uses N(d2); “touches” uses the
-            first-passage formula. Volatility is realised volatility from hourly prices over the last ~12 days.
+            first-passage formula. Volatility is realised volatility from hourly closes (Solami on-chain bars when available, otherwise Coinbase).
           </li>
           <li>
             For markets on Panta&apos;s opening curve, EdgeScope requests real Panta quotes, so cost per share includes the
@@ -174,7 +187,8 @@ export default async function Home() {
           Prediction markets may be restricted where you live.
         </p>
         <p className={styles.muted}>
-          Data: Panta API (market prices and quotes), Coinbase public prices (interim spot source). Powered by Panta.
+          Data: Panta API (market prices and quotes), Solami Blur (on-chain Solana DEX prices), Coinbase public prices
+          (cross-check and fallback). Powered by Panta.
         </p>
       </footer>
     </main>
@@ -193,5 +207,70 @@ function Bar({ label, value, tone }: { label: string; value: number | null; tone
       </div>
       <span className={styles.barValue}>{pct(value)}</span>
     </div>
+  );
+}
+
+function Feed({ asset, rows }: { asset: string; rows: PriceRow[] }) {
+  const onchain = rows.filter((r) => r.source === "solami-blur");
+  const ref = rows.filter((r) => r.source !== "solami-blur" && r.ok);
+  const lastOn = [...onchain].reverse().find((r) => r.ok && r.spot != null);
+  const lastOnAny = onchain[onchain.length - 1];
+  const lastRef = ref[ref.length - 1];
+  const gapBps = lastOn?.spot && lastRef?.spot ? (lastOn.spot / lastRef.spot - 1) * 1e4 : null;
+  const live = lastOnAny?.ok;
+  const used = live && gapBps != null && Math.abs(gapBps) <= 300 ? "Solami (on-chain)" : lastRef ? "Coinbase (fallback)" : "—";
+  return (
+    <article className={styles.feed}>
+      <div className={styles.cardTop}>
+        <span className={styles.badge}>{asset}</span>
+        <span className={live ? styles.dotOn : styles.dotOff} />
+        <span className={styles.muted}>{live ? "Solami live" : "Solami pending"}</span>
+        <span className={styles.expiry}>model uses: {used}</span>
+      </div>
+      <dl className={styles.grid}>
+        <div>
+          <dt>On-chain (Solami Blur)</dt>
+          <dd>{usd(lastOn?.spot ?? null)}</dd>
+        </div>
+        <div>
+          <dt>Reference (Coinbase)</dt>
+          <dd>{usd(lastRef?.spot ?? null)}</dd>
+        </div>
+        <div>
+          <dt>On-chain vs reference</dt>
+          <dd>{gapBps == null ? "—" : `${gapBps > 0 ? "+" : ""}${gapBps.toFixed(0)} bps`}</dd>
+        </div>
+        <div>
+          <dt>Realised vol (annual)</dt>
+          <dd>{pct((lastOn ?? lastRef)?.vol_annual ?? null, 0)}</dd>
+        </div>
+      </dl>
+      <Spark a={onchain.filter((r) => r.ok)} b={ref} />
+      {!live && lastOnAny?.note && <p className={styles.note}>{lastOnAny.note}</p>}
+    </article>
+  );
+}
+
+// Two-line sparkline: on-chain (solid) vs reference (dashed), last 24h.
+function Spark({ a, b }: { a: PriceRow[]; b: PriceRow[] }) {
+  const pts = [...a, ...b].filter((r) => r.spot != null);
+  if (pts.length < 2) return <div className={styles.sparkEmpty}>Collecting history…</div>;
+  const t0 = Math.min(...pts.map((r) => Date.parse(r.ts))), t1 = Math.max(...pts.map((r) => Date.parse(r.ts)));
+  const lo = Math.min(...pts.map((r) => r.spot!)), hi = Math.max(...pts.map((r) => r.spot!));
+  const W = 300, Hh = 56;
+  const path = (rs: PriceRow[]) =>
+    rs
+      .filter((r) => r.spot != null)
+      .map((r, i) => {
+        const x = t1 === t0 ? 0 : ((Date.parse(r.ts) - t0) / (t1 - t0)) * W;
+        const y = hi === lo ? Hh / 2 : Hh - ((r.spot! - lo) / (hi - lo)) * (Hh - 4) - 2;
+        return `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  return (
+    <svg className={styles.spark} viewBox={`0 0 ${W} ${Hh}`} preserveAspectRatio="none" role="img" aria-label="24 hour price">
+      <path d={path(b)} className={styles.sparkRef} />
+      <path d={path(a)} className={styles.sparkOn} />
+    </svg>
   );
 }

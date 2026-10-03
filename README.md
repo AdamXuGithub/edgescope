@@ -20,7 +20,8 @@ volatility, then shows how far the market price sits from the model — **after 
 ```
 Panta API ──┐                          ┌── Next.js dashboard (Vercel, ISR 60s)
             ├─> Supabase Edge Function ─┤
-Price feed ─┘    es-collect (every 5m)  └── Postgres: es_markets / es_snapshots / es_valuations
+Solami Blur ┤    es-collect (every 5m)  └── Postgres: es_markets / es_snapshots / es_valuations / es_prices
+Coinbase ───┘
 ```
 - `supabase/functions/es-collect` — pulls the Panta catalogue, stores snapshots (Panta has no price history
   endpoint), parses questions, runs the model, requests quotes (within Panta rate limits).
@@ -31,11 +32,16 @@ Price feed ─┘    es-collect (every 5m)  └── Postgres: es_markets / es_
 Driftless lognormal. "Closes above K at T": `N(d2)`, `d2 = (ln(S/K) − σ²T/2) / (σ√T)`.
 "Touches K by T": first-passage probability. σ = realised volatility from hourly closes.
 
-Price source: Coinbase public candles (interim). Solami real-time data is being integrated as the primary source.
+## Price data (Solami)
+- **Primary:** Solami Blur REST — decoded on-chain Solana DEX trades. EdgeScope reads `/data/token/ohlcv` (hourly
+  bars for realised volatility) and `/data/token/price` (latest trade) for wrapped SOL, cbBTC and Wormhole WETH.
+- **Cross-check / fallback:** Coinbase public hourly candles. Both sources are logged to `es_prices` every run; if the
+  on-chain and reference prices differ by more than 3%, the model uses the reference and flags it on the card.
+- Set the secret `SOLAMI_API_KEY` (an API key with the DataApi permission) on the `es-collect` function.
 
 ## Run it
 1. Apply the migrations to a Supabase project.
-2. Deploy `es-collect` and set the secret `PANTA_API_KEY`.
+2. Deploy `es-collect` and set the secrets `PANTA_API_KEY` and `SOLAMI_API_KEY`.
 3. `cd web && npm i && npm run dev` (optionally set `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY`).
 
 Built for the Colosseum Crypto World's Fair hackathon.

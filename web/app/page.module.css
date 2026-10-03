@@ -36,6 +36,15 @@
 .method ol { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--text); }
 .disclaimer { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 20px; font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
 .error { color: var(--warn); }
+.feeds { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px; margin-top: 12px; }
+.feed { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.dotOn, .dotOff { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dotOn { background: var(--accent); }
+.dotOff { background: var(--warn); }
+.spark { width: 100%; height: 56px; display: block; }
+.sparkOn { fill: none; stroke: var(--model); stroke-width: 1.8; vector-effect: non-scaling-stroke; }
+.sparkRef { fill: none; stroke: var(--market); stroke-width: 1.2; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.sparkEmpty { height: 56px; display: flex; align-items: center; color: var(--muted); font-size: 13px; }
 @media (max-width: 560px) {
   .barRow { grid-template-columns: 1fr 48px; }
   .barLabel { grid-column: 1 / -1; }
